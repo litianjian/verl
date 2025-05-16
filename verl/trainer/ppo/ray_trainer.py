@@ -59,7 +59,7 @@ from verl.utils.metric import (
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.torch_functional import masked_mean
 from verl.utils.tracking import ValidationGenerationsLogger
-from verl.workers.rollout.async_server import AsyncLLMServerManager
+from verl.workers.rollout.async_server import AsyncLLMServerManager, AsyncLLMServerManager1
 
 WorkerType = Type[Worker]
 
@@ -737,6 +737,7 @@ class RayPPOTrainer:
         self.actor_rollout_wg.init_model()
 
         # create async rollout manager and request scheduler
+        import pdb; pdb.set_trace()
         self.async_rollout_mode = False
         if self.config.actor_rollout_ref.rollout.mode == "async":
             self.async_rollout_mode = True
@@ -744,7 +745,13 @@ class RayPPOTrainer:
                 config=self.config.actor_rollout_ref,
                 worker_group=self.actor_rollout_wg,
             )
-
+        if self.config.actor_rollout_ref.rollout.mode == "async_vllm":
+            self.async_rollout_mode = True
+            self.async_rollout_manager = AsyncLLMServerManager1(
+                config=self.config.actor_rollout_ref,
+                worker_group=self.actor_rollout_wg,
+            )
+        
     def _save_checkpoint(self):
         # path: given_path + `/global_step_{global_steps}` + `/actor`
         local_global_step_folder = os.path.join(self.config.trainer.default_local_dir, f"global_step_{self.global_steps}")
@@ -883,6 +890,7 @@ class RayPPOTrainer:
 
         for epoch in range(self.config.trainer.total_epochs):
             for batch_dict in self.train_dataloader:
+                # import pdb; pdb.set_trace()
                 metrics = {}
                 timing_raw = {}
                 batch: DataProto = DataProto.from_single_dict(batch_dict)

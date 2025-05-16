@@ -19,6 +19,7 @@ import logging
 import os
 import warnings
 from typing import Union
+import ray
 
 import psutil
 import torch
@@ -1332,6 +1333,94 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
         self.vllm_tp_size = self.config.rollout.tensor_model_parallel_size
         self.vllm_dp_rank = int(os.environ["RANK"]) // self.vllm_tp_size
         self.vllm_tp_rank = int(os.environ["RANK"]) % self.vllm_tp_size
+
+        # used for sleep/wake_up
+        rollout.sharding_manager = rollout_sharding_manager
+
+        return rollout, rollout_sharding_manager
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def generate_sequences(self, prompts: DataProto):
+        raise NotImplementedError("AsyncActorRolloutRefWorker does not support generate_sequences")
+
+    @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
+    def execute_method(self, method: Union[str, bytes], *args, **kwargs):
+        """Called by ExternalRayDistributedExecutor collective_rpc."""
+        if self.vllm_tp_rank == 0 and method != "execute_model":
+            print(f"[DP={self.vllm_dp_rank},TP={self.vllm_tp_rank}] execute_method: {method if isinstance(method, str) else 'Callable'}")
+        return self.rollout.execute_method(method, *args, **kwargs)
+
+
+# ================================= Async related workers =================================
+class AsyncvLLMActorRolloutRefWorker(ActorRolloutRefWorker):
+    def _build_rollout(self, trust_remote_code=False):
+        # rollout, rollout_sharding_manager = super()._build_rollout(trust_remote_code)
+
+        from torch.distributed.device_mesh import init_device_mesh
+        # TODO(sgm): support FSDP hybrid shard for larger model
+        infer_tp = self.config.rollout.tensor_model_parallel_size
+        dp = self.world_size // infer_tp
+        assert self.world_size % infer_tp == 0, f"rollout world_size: {self.world_size} is not divisible by infer_tp: {infer_tp}"
+        rollout_device_mesh = init_device_mesh("cuda", mesh_shape=(dp, infer_tp), mesh_dim_names=["dp", "infer_tp"])
+        rollout_name = self.config.rollout.name
+
+
+        self.vllm_tp_size = self.config.rollout.tensor_model_parallel_size
+        self.vllm_dp_rank = int(os.environ["RANK"]) // self.vllm_tp_size
+        self.vllm_tp_rank = int(os.environ["RANK"]) % self.vllm_tp_size
+        self.vllm_dp_size = int(os.environ["WORLD_SIZE"]) // self.vllm_tp_size
+
+        name_prefix = os.environ.get("WG_PREFIX", "")
+        namespace = ray.get_runtime_context().namespace
+
+        print(f"[DP={self.vllm_dp_rank},TP={self.vllm_tp_rank}] {name_prefix} rollout: {rollout_name}")
+        instance_id = f"{namespace}:{name_prefix}:{self.vllm_dp_size}:{self.vllm_dp_rank}"
+
+
+        if rollout_name == "vllm":
+            from verl.workers.rollout.vllm_rollout import vllm_mode, vLLMRollout
+            from verl.workers.sharding_manager.fsdp_vllm import FSDPVLLMShardingManager
+
+            log_gpu_memory_usage(f"Before building {rollout_name} rollout", logger=logger)
+            local_path = copy_to_local(self.config.model.path)
+            if vllm_mode == "customized":
+                rollout = vLLMRollout(
+                    actor_module=self.actor_module_fsdp,
+                    config=self.config.rollout,
+                    tokenizer=self.tokenizer,
+                    model_hf_config=self.actor_model_config,
+                    trust_remote_code=trust_remote_code,
+                )
+            elif vllm_mode == "spmd":
+                # from verl.workers.rollout.vllm_rollout import vLLMAsyncRollout
+                from verl.workers.rollout.vllm_rollout.vllm_async_rollout_spmd import vLLMAsyncRolloutSPMD
+                vllm_rollout_cls = vLLMRollout if self.config.rollout.mode == "sync" else vLLMAsyncRolloutSPMD
+                rollout = vllm_rollout_cls(
+                    model_path=local_path,
+                    config=self.config.rollout,
+                    tokenizer=self.tokenizer,
+                    model_hf_config=self.actor_model_config,
+                    device_mesh=rollout_device_mesh,
+                    trust_remote_code=trust_remote_code,
+                    instance_id=instance_id,
+                )
+            else:
+                raise NotImplementedError("vllm_mode must be 'customized' or 'spmd'")
+            import pdb; pdb.set_trace()
+            log_gpu_memory_usage(f"After building {rollout_name} rollout", logger=logger)
+            if torch.distributed.get_world_size() == 1:
+                self.config.rollout.load_format = "dummy_hf"
+            rollout_sharding_manager = FSDPVLLMShardingManager(
+                module=self.actor_module_fsdp,
+                inference_engine=rollout.inference_engine,
+                model_config=self.actor_model_config,
+                full_params="hf" in self.config.rollout.load_format,
+                device_mesh=rollout_device_mesh,
+                offload_param=self._is_offload_param,
+            )
+            log_gpu_memory_usage("After building sharding manager", logger=logger)        
+        # NOTE: rollout is not actually initialized here, it's deferred
+        # to be initialized by AsyncvLLMServer.
 
         # used for sleep/wake_up
         rollout.sharding_manager = rollout_sharding_manager
