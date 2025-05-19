@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingM
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor.abstract import Executor
 from vllm.worker.worker_base import WorkerWrapperBase
+from verl import DataProto
 
 from verl.utils.fs import copy_to_local
 from verl.workers.rollout.async_server import AsyncServerBase
@@ -47,13 +48,13 @@ class ExternalRayDistributedExecutor(Executor):
         fields = self.vllm_config.instance_id.split(":")
         assert len(fields) == 4, f"instance_id: {self.vllm_config.instance_id} must be in the format of <namespace>:<wg_prefix>:<vllm_dp_size>:<vllm_dp_rank>."
         namespace, wg_prefix, vllm_dp_size, vllm_dp_rank = fields[0], fields[1], int(fields[2]), int(fields[3])
-        print(namespace, wg_prefix, vllm_dp_size, vllm_dp_rank)
+        # print(namespace, wg_prefix, vllm_dp_size, vllm_dp_rank)
         # Make sure subprocess in same namespace as parent actor.
         # actor name format: {name_prefix}WorkerDict_{pg_idx}:{local_rank}
         ray.init(namespace=namespace)
         actor_names1 = [actor_name for actor_name in ray.util.list_named_actors()]
         actor_names = [actor_name for actor_name in ray.util.list_named_actors() if actor_name.startswith(f"{wg_prefix}WorkerDict")]
-        print("jhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",actor_names,actor_names1)
+        # print("jhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh",actor_names,actor_names1)
         # import pdb; pdb.set_trace()
         vllm_tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         assert len(actor_names) == vllm_dp_size * vllm_tp_size, f"instance_id: {self.vllm_config.instance_id} has {len(actor_names)} actors, but vllm_dp_size: {vllm_dp_size} * vllm_tp_size: {vllm_tp_size} = {vllm_dp_size * vllm_tp_size} is expected."
@@ -211,6 +212,8 @@ class AsyncvLLMServer(AsyncServerBase):
         """
         request_json = await raw_request.json()
         request = ChatCompletionRequest(**request_json)
+        # import time
+        # print(f"t100 {time.time()}")
         generator = await self.openai_serving_chat.create_chat_completion(request, raw_request)
 
         if isinstance(generator, ErrorResponse):
@@ -252,6 +255,17 @@ class AsyncvLLMServer(AsyncServerBase):
         await self.engine.sleep()
 
 
+from verl.workers.rollout.schemas import AsyncRolloutRequest, AsyncRolloutRequestStateEnum, Message
+from verl.workers.rollout.vllm_rollout.vllm_rollout import _pre_process_inputs
+from verl.utils.model import compute_position_id_with_mask
+import asyncio
+from uuid import uuid4
+import torch
+from copy import deepcopy
+from contextlib import contextmanager
+from vllm.outputs import RequestOutput
+import os
+
 @ray.remote(num_cpus=1)
 class AsyncvLLMServer1(AsyncServerBase):
     """
@@ -269,7 +283,7 @@ class AsyncvLLMServer1(AsyncServerBase):
     For vLLM AsyncLLM design, see: https://github.com/vllm-project/vllm/pull/9826
     """
 
-    def __init__(self, config: DictConfig, vllm_dp_size: int, vllm_dp_rank: int, wg_prefix: str):
+    def __init__(self, config: DictConfig, vllm_dp_size: int, vllm_dp_rank: int, wg_prefix: str, tokenizer):
         """
         Args:
             config: DictConfig, actor_rollout_ref config.
@@ -277,15 +291,17 @@ class AsyncvLLMServer1(AsyncServerBase):
             vllm_dp_rank: int, vllm data parallel rank.
             wg_prefix: str, worker group prefix, used to lookup actors.
         """
-        super().__init__()
+        # super().__init__()
 
         self.config = config
         self.vllm_dp_size = vllm_dp_size
         self.vllm_dp_rank = vllm_dp_rank
         self.wg_prefix = wg_prefix
+        self.tokenizer = tokenizer
         self.engine: AsyncLLM = None
+        self.pad_token_id = self.tokenizer.pad_token_id
 
-    async def init_engine(self):
+    def init_engine(self):
         """Init vLLM AsyncLLM engine."""
         config = self.config
         model_path = config.model.path
@@ -311,6 +327,8 @@ class AsyncvLLMServer1(AsyncServerBase):
                 kwargs[k] = config.get(k)
         print(f"override_generation_config: {kwargs}")
 
+        self.sampling_params = SamplingParams(**kwargs)
+
         engine_args = AsyncEngineArgs(
             model=local_path,
             enable_sleep_mode=True,
@@ -325,7 +343,8 @@ class AsyncvLLMServer1(AsyncServerBase):
             skip_tokenizer_init=False,
             max_model_len=max_model_len,
             load_format="auto",
-            disable_log_stats=config.disable_log_stats,
+            # disable_log_stats=config.disable_log_stats,
+            disable_log_stats=False,
             max_num_batched_tokens=max_num_batched_tokens,
             enable_chunked_prefill=config.enable_chunked_prefill,
             enable_prefix_caching=True,
@@ -338,6 +357,133 @@ class AsyncvLLMServer1(AsyncServerBase):
         namespace = ray.get_runtime_context().namespace
         vllm_config.instance_id = f"{namespace}:{self.wg_prefix}:{self.vllm_dp_size}:{self.vllm_dp_rank}"
         self.engine = AsyncLLM.from_vllm_config(vllm_config)
+        # import pdb; pdb.set_trace()
+        # results = self.engine.generate(prompt="hellp", sampling_params=self.sampling_params, request_id="test")
+        # try:
+        #     async for res in results:
+        #         final_outputs = res
+        # except ValueError as e:
+        #     # TODO: Use a vllm-specific Validation Error
+        #     raise ValueError(str(e))
+        # import pdb; pdb.set_trace()
+        # print(final_outputs)
+
+    def _preprocess_prompt_to_async_rollout_requests(self, prompts: DataProto, n) -> List[AsyncRolloutRequest]:
+        assert "raw_prompt" in prompts.non_tensor_batch, "need data.return_raw_chat=True, due to no official way do parse_messages"
+        req_list = []
+        for data_idx, raw_prompt in enumerate(prompts.non_tensor_batch["raw_prompt"]):
+            for idx in range(n):
+                _input_ids = _pre_process_inputs(self.pad_token_id, prompts.batch['input_ids'][data_idx])
+                _attention_mask = _pre_process_inputs(0, prompts.batch["attention_mask"][data_idx])
+                _position_ids = compute_position_id_with_mask(torch.tensor(_attention_mask)).tolist()
+                # import pdb; pdb.set_trace()
+                req = AsyncRolloutRequest(
+                    batch_data_id=data_idx,
+                    rollout_offset=idx,
+                    request_id=str(uuid4()),
+                    state=AsyncRolloutRequestStateEnum.PENDING,
+                    messages=[Message.model_validate(msg) for msg in raw_prompt],
+                    input_ids=_input_ids,
+                    prompt_ids=_input_ids,
+                    response_ids=[],
+                    attention_mask=_attention_mask,
+                    prompt_attention_mask=_attention_mask,
+                    response_attention_mask=[],
+                    position_ids=_position_ids,
+                    prompt_position_ids=_position_ids,
+                    response_position_ids=[],
+                    loss_mask=[0] * len(_input_ids),
+                    prompt_loss_mask=[0] * len(_input_ids),
+                    response_loss_mask=[],
+                    reward_scores={},
+                    max_response_len=self.config.rollout.response_length,
+                    max_model_len=(self.config.rollout.max_model_len or self.config.rollout.prompt_length + self.config.rollout.response_length),
+                )
+                error_message = f"Request {req.request_id} has mismatched lengths: input_ids={len(req.input_ids)}, attention_mask={len(req.attention_mask)}, position_ids={len(req.position_ids)}, loss_mask={len(req.loss_mask)}"
+                assert len(req.input_ids) == len(req.attention_mask) == len(req.position_ids) == len(req.loss_mask), error_message
+                req_list.append(req)
+
+        return req_list
+
+    async def _async_rollout_a_request(self, req: AsyncRolloutRequest, do_sample: bool = True, is_validate: bool = False, **kwargs) -> AsyncRolloutRequest:
+        _req = deepcopy(req)
+        finish_reason_type = None
+        output = None
+        current_turns = 0
+
+        generation_prompt = _req.get_generation_prompt(self.tokenizer)
+        # print(generation_prompt)
+
+        if not do_sample:
+            kwargs = {
+                "best_of": 1,
+                "top_p": 1.0,
+                "top_k": -1,
+                "min_p": 0.0,
+                "temperature": 0,
+                "n": 1,  # if greedy, only 1 response
+            }
+        elif is_validate:
+            # TODO: try **
+            kwargs = {
+                "top_k": self.config.val_kwargs.top_k,
+                "top_p": self.config.val_kwargs.top_p,
+                "temperature": self.config.val_kwargs.temperature,
+                "n": 1,  # if validate, already repeat in ray_trainer
+            }
+
+        if "n" not in kwargs or kwargs["n"] > 1:  # group size is supported in preprocess
+            kwargs["n"] = 1
+
+        # print("hhhhhhhhhh", os.getenv("CUDA_VISIBLE_DEVICES"))
+        # users can customize different sampling_params at different run
+        outputs: List[AsyncGenerator[RequestOutput, None]] = []
+        with self.update_sampling_params(**kwargs):
+            outputs = self.engine.generate(
+                # prompt=generation_prompt,  # because we have already convert it to prompt token id
+                prompt="介绍一下你自己",
+                sampling_params=self.sampling_params,
+                request_id=_req.request_id,
+            )
+            async for res in outputs:
+                results = res
+        content = results.outputs[0].text
+        finish_reason = results.outputs[0].finish_reason
+
+        print(finish_reason)
+        return results.outputs[0].text
+
+    @contextmanager
+    def update_sampling_params(self, **kwargs):
+        # update sampling params
+        old_sampling_params_args = {}
+        if kwargs:
+            for key, value in kwargs.items():
+                if hasattr(self.sampling_params, key):
+                    old_value = getattr(self.sampling_params, key)
+                    old_sampling_params_args[key] = old_value
+                    setattr(self.sampling_params, key, value)
+        yield
+        # roll back to previous sampling params
+        # if len(old_sampling_params_args):
+        for key, value in old_sampling_params_args.items():
+            setattr(self.sampling_params, key, value)
+
+    async def generate_sequences(self, prompts: DataProto, **kwargs) -> DataProto:
+        do_sample = prompts.meta_info.get("do_sample", True)
+        is_validate = prompts.meta_info.get("is_validate", False)
+        tgt_device = prompts.batch["input_ids"].device
+
+        req_list = self._preprocess_prompt_to_async_rollout_requests(
+            prompts,
+            n=1 if is_validate else self.config.rollout.n,
+        )
+
+        with torch.no_grad():
+            results = await asyncio.gather(
+                *[self._async_rollout_a_request(req, do_sample, is_validate, **kwargs) for req in req_list]
+            )
+        return results
 
     async def chat_completion(self, raw_request: Request):
         """OpenAI-compatible HTTP endpoint.
@@ -356,28 +502,6 @@ class AsyncvLLMServer1(AsyncServerBase):
         else:
             assert isinstance(generator, ChatCompletionResponse)
             return JSONResponse(content=generator.model_dump())
-
-    async def chat_completion_generator(self, request: ChatCompletionRequest) -> AsyncGenerator[Tuple[int, str]]:
-        """Direct chat completion without FastAPI.
-
-        Args:
-            request: ChatCompletionRequest, request object.
-
-        Returns:
-            AsyncGenerator[Tuple[int, str]]: async generator of (status_code, data) pairs.
-        """
-        generator = await self.openai_serving_chat.create_chat_completion(request)
-        if isinstance(generator, ErrorResponse):
-            data = generator.model_dump_json(exclude_unset=True)
-            yield generator.code, f"data: {data}\n\n"
-
-        if request.stream:
-            async for chunk in generator:
-                yield 200, chunk
-        else:
-            assert isinstance(generator, ChatCompletionResponse)
-            data = generator.model_dump_json(exclude_unset=True)
-            yield 200, f"data: {data}\n\n"
 
     async def wake_up(self):
         await self.engine.wake_up()

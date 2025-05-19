@@ -37,7 +37,7 @@ from verl.utils.torch_functional import broadcast_dict_tensor, masked_mean, spli
 from verl.workers.critic import BasePPOCritic
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class MegatronPPOCritic(BasePPOCritic):

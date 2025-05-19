@@ -27,7 +27,7 @@ from verl.utils.seqlen_balancing import rearrange_micro_batches
 from verl.workers.actor.dp_actor import DataParallelPPOActor
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def compute_sppo_loss(

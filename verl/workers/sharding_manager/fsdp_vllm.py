@@ -33,7 +33,7 @@ from verl.utils.vllm_utils import patch_vllm_moe_model_weight_loader
 from .base import BaseShardingManager
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class FSDPVLLMShardingManager(BaseShardingManager):

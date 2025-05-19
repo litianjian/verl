@@ -49,7 +49,7 @@ from verl.workers.actor import BasePPOActor
 __all__ = ["MegatronPPOActor"]
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class MegatronPPOActor(BasePPOActor):

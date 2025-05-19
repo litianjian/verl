@@ -23,6 +23,9 @@ from contextlib import asynccontextmanager
 from typing import Any, Callable, Dict, List, Tuple, Type
 from uuid import uuid4
 import time
+import random
+import httpx
+from urllib.parse import urlparse
 
 import aiohttp
 import fastapi
@@ -128,11 +131,35 @@ class ChatCompletionScheduler:
 
         # Least requests load balancing
         self.weighted_addresses = [[0, address] for address in server_addresses]
+
+        self.client_pool = self._init_client_pool(server_addresses)
         heapq.heapify(self.weighted_addresses)
 
         # LRU cache to map request_id to address
         self.request_id_to_address = LRUCache(maxsize=max_cache_size)
 
+    def _init_client_pool(self, server_addresses):
+        """Init client pool."""
+        client_pool = {
+            address: [AsyncOpenAI(
+                base_url=f"http://{address}/v1",
+                api_key="token-abc123",
+                timeout=None,
+                max_retries=3,
+                http_client=httpx.AsyncClient(http2=True)
+            )
+            for _ in range(8)
+            ]
+            for address in server_addresses
+        }
+        return client_pool
+
+    def _get_clients_by_address(self, address: str) -> List[AsyncOpenAI]:
+        client = self.client_pool.get(address)
+        if client is None:
+            raise ValueError(f"No client found for address {address}")
+        return client
+    
     async def submit_chat_completions(
         self,
         callback: Callable[[ChatCompletion, Dict[str, Any], Exception], None],
@@ -164,7 +191,7 @@ class ChatCompletionScheduler:
         """
         if "extra_headers" not in chat_complete_request:
             chat_complete_request["extra_headers"] = {}
-        print(f"t1: {time.time()}")
+        # print(f"t1: {time.time()}")
 
         extra_headers = chat_complete_request["extra_headers"]
         request_id = extra_headers.get("x-request-id", None)
@@ -184,6 +211,8 @@ class ChatCompletionScheduler:
         self.request_id_to_address[request_id] = address
         chat_complete_request["extra_headers"]["x-request-id"] = request_id
 
+        # client = self._get_clients_by_address(address)
+        # print(client.base_url)
         completions, exception = None, None
         try:
             # TODO: OpenAI client uses httpx, seems to have performance issue in high concurrency requests.
@@ -192,16 +221,27 @@ class ChatCompletionScheduler:
             # Let user handle the exception
             exception = e
 
-        await callback(completions, callback_additional_info, exception)
+        # await callback(completions, callback_additional_info, exception)
+        asyncio.create_task(self._safe_callback_wrapper(callback, completions, callback_additional_info, exception))
 
+    async def _safe_callback_wrapper(self, callback, *args):
+        try:
+            await callback(*args)
+        except Exception as e:
+            logger.error(f"Callback failed: {e}")
+    
     async def _chat_completions_openai(self, address: str, **chat_complete_request) -> ChatCompletion:
-        client = AsyncOpenAI(
-            base_url=f"http://{address}/v1",
-            api_key="token-abc123",
-            timeout=None,
-            max_retries=0
-        )
-        print(f"t2: {time.time()}")
+        # print(f"t2.0: {time.time()}, {address}")
+        # client = AsyncOpenAI(
+        #     base_url=f"http://{address}/v1",
+        #     api_key="token-abc123",
+        #     timeout=None,
+        #     max_retries=0
+        # )
+
+        clients = self._get_clients_by_address(address)
+        client = random.choice(clients)
+        # print(f"t20.0: {time.time()}, {address}, {client.base_url}")
         return await client.chat.completions.create(**chat_complete_request)
 
     # async def _chat_completions_aiohttp(self, address: str, **chat_complete_request) -> ChatCompletion:
@@ -344,7 +384,7 @@ class AsyncLLMServerManager:
 class AsyncLLMServerManager1:
     """AsyncLLMServerManager manage a group of vllm instances, i.e AsyncvLLMServer."""
 
-    def __init__(self, config: DictConfig, worker_group: RayWorkerGroup, *, scheduler_kwargs: Dict[str, Any] = None):
+    def __init__(self, config: DictConfig, worker_group: RayWorkerGroup, tokenizer, *, scheduler_kwargs: Dict[str, Any] = None):
         """Initialize AsyncLLMServerManager.
 
         Args:
@@ -355,7 +395,7 @@ class AsyncLLMServerManager1:
         self.config = config
         self.worker_group = worker_group
         self.scheduler_kwargs = scheduler_kwargs if scheduler_kwargs else {}
-
+        self.tokenizer = tokenizer
         self.rollout_tp_size = self.config.rollout.tensor_model_parallel_size
         self.rollout_dp_size = self.worker_group.world_size // self.rollout_tp_size
 
@@ -381,14 +421,14 @@ class AsyncLLMServerManager1:
                         soft=False,
                     ),
                     name=f"async_llm_server_{rollout_dp_rank}",
-                ).remote(config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix)
+                ).remote(config, self.rollout_dp_size, rollout_dp_rank, self.worker_group.name_prefix, self.tokenizer)
                 for rollout_dp_rank in unready_dp_ranks
             }
 
             for rollout_dp_rank, server in servers.items():
                 try:
-                    address = ray.get(server.get_server_address.remote())
-                    self.server_addresses[rollout_dp_rank] = address
+                    # address = ray.get(server.get_server_address.remote())
+                    # self.server_addresses[rollout_dp_rank] = address
                     self.async_llm_servers[rollout_dp_rank] = server
                     unready_dp_ranks.remove(rollout_dp_rank)
                 except Exception:
@@ -399,29 +439,29 @@ class AsyncLLMServerManager1:
         ray.get([server.init_engine.remote() for server in self.async_llm_servers])
 
         # Init user provided chat scheduler in sperate thread.
-        self.chat_scheduler: ChatCompletionScheduler = None
-        self.chat_scheduler_loop = None
-        self.chat_scheduler_ready = threading.Event()
-        self.chat_scheduler_thread = threading.Thread(target=self._init_chat_scheduler, daemon=True)
-        self.chat_scheduler_thread.start()
-        self.chat_scheduler_ready.wait()
+    #     self.chat_scheduler: ChatCompletionScheduler = None
+    #     self.chat_scheduler_loop = None
+    #     self.chat_scheduler_ready = threading.Event()
+    #     self.chat_scheduler_thread = threading.Thread(target=self._init_chat_scheduler, daemon=True)
+    #     self.chat_scheduler_thread.start()
+    #     self.chat_scheduler_ready.wait()
 
-    def _init_chat_scheduler(self):
-        self.chat_scheduler_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.chat_scheduler_loop)
+    # def _init_chat_scheduler(self):
+    #     self.chat_scheduler_loop = asyncio.new_event_loop()
+    #     asyncio.set_event_loop(self.chat_scheduler_loop)
 
-        module_path, class_name = self.config.rollout.chat_scheduler.rsplit(".", 1)
-        module = importlib.import_module(module_path)
-        scheduler_cls = getattr(module, class_name)
-        self.chat_scheduler = scheduler_cls(
-            config=self.config.rollout,
-            model_path=self.config.model.path,
-            server_addresses=self.server_addresses,
-            **self.scheduler_kwargs,
-        )
+    #     module_path, class_name = self.config.rollout.chat_scheduler.rsplit(".", 1)
+    #     module = importlib.import_module(module_path)
+    #     scheduler_cls = getattr(module, class_name)
+    #     self.chat_scheduler = scheduler_cls(
+    #         config=self.config.rollout,
+    #         model_path=self.config.model.path,
+    #         server_addresses=self.server_addresses,
+    #         **self.scheduler_kwargs,
+    #     )
 
-        self.chat_scheduler_ready.set()
-        self.chat_scheduler_loop.run_forever()
+    #     self.chat_scheduler_ready.set()
+    #     self.chat_scheduler_loop.run_forever()
 
     def wake_up(self):
         """Wake up all vllm instances."""
@@ -431,35 +471,16 @@ class AsyncLLMServerManager1:
         """Sleep all vllm instances."""
         ray.get([server.sleep.remote() for server in self.async_llm_servers])
 
-    def submit_chat_completions(
-        self,
-        callback: Callable[[ChatCompletion, Dict[str, Any], Exception], None],
-        callback_additional_info: Dict[str, Any],
-        **chat_complete_request,
-    ):
-        """Submit a chat completion request to chat scheduler and wait until it is done.
-        To submit multiple requests in parallel, please use `generate_sequences` instead.
-
-        Args: same as ChatCompletionScheduler.submit_chat_completions.
-        """
-        assert self.chat_scheduler is not None, "chat scheduler is not initialized."
-        future = asyncio.run_coroutine_threadsafe(
-            self.chat_scheduler.submit_chat_completions(
-                callback=callback,
-                callback_additional_info=callback_additional_info,
-                **chat_complete_request,
-            ),
-            self.chat_scheduler_loop,
-        )
-        future.result()
-
     def generate_sequences(self, prompts: DataProto, **sampling_params) -> DataProto:
         """Generate multiple sequences in parallel via chat scheduler."""
-        assert self.chat_scheduler is not None, "chat scheduler is not initialized."
+        # assert self.chat_scheduler is not None, "chat scheduler is not initialized."
+        # import pdb; pdb.set_trace()
+        result = [
+            server.generate_sequences.remote(prompts, **sampling_params)
+            for server in self.async_llm_servers
+        ]
+        return ray.get(result)
 
-        future = asyncio.run_coroutine_threadsafe(self.chat_scheduler.generate_sequences(prompts, **sampling_params), self.chat_scheduler_loop)
-        return future.result()
-    
 
 def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
     """Get async server class.

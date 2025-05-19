@@ -38,7 +38,7 @@ from verl.workers.critic import BasePPOCritic
 __all__ = ["DataParallelPPOCritic"]
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 class DataParallelPPOCritic(BasePPOCritic):

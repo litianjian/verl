@@ -51,7 +51,7 @@ from verl.workers.rollout.base import BaseRollout
 from verl.workers.rollout.vllm_rollout.vllm_async_server import ExternalRayDistributedExecutor
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 # TODO
 # 1. support pp in vllm

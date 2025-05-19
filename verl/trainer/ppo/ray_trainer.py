@@ -737,7 +737,6 @@ class RayPPOTrainer:
         self.actor_rollout_wg.init_model()
 
         # create async rollout manager and request scheduler
-        import pdb; pdb.set_trace()
         self.async_rollout_mode = False
         if self.config.actor_rollout_ref.rollout.mode == "async":
             self.async_rollout_mode = True
@@ -745,11 +744,13 @@ class RayPPOTrainer:
                 config=self.config.actor_rollout_ref,
                 worker_group=self.actor_rollout_wg,
             )
+        print(self.config.actor_rollout_ref)
         if self.config.actor_rollout_ref.rollout.mode == "async_vllm":
             self.async_rollout_mode = True
             self.async_rollout_manager = AsyncLLMServerManager1(
                 config=self.config.actor_rollout_ref,
                 worker_group=self.actor_rollout_wg,
+                tokenizer=self.tokenizer,
             )
         
     def _save_checkpoint(self):

@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     from torch import nn
 
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def get_tool_call_parser_type(tokenizer: PreTrainedTokenizer) -> str:

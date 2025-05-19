@@ -52,7 +52,7 @@ from .base import BaseShardingManager
 
 # from vllm.distributed import parallel_state as sglang_ps
 logger = logging.getLogger(__file__)
-logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "WARN"))
+logger.setLevel(os.getenv("VERL_LOGGING_LEVEL", "INFO"))
 
 
 def _preprocess_tensor_for_update_weights(tensor: torch.Tensor):

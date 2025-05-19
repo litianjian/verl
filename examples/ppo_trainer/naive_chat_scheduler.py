@@ -65,6 +65,8 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
 
         # TODO: we may need to control max concurrent requests here, or it will harm prefix cache hit rate.
         tasks, batch_conversations = [], [None] * len(batch)
+        import time
+        print(f"t00 {time.time()}")
         for batch_index, conversation in enumerate(batch.non_tensor_batch["raw_prompt"]):
             # raw_prompt: [{"role": "user", "content": ""}, ["role": "assistant", "content"], ...]
             tasks.append(
@@ -84,6 +86,7 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
             )
         await asyncio.gather(*tasks)
         print("[NaiveChatCompletionScheduler] generate_sequences done")
+        print(f"t10 {time.time()}")
 
         return self._postprocess(batch, batch_conversations, kwargs["n"])
 
