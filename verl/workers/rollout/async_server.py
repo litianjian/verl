@@ -216,13 +216,13 @@ class ChatCompletionScheduler:
         completions, exception = None, None
         try:
             # TODO: OpenAI client uses httpx, seems to have performance issue in high concurrency requests.
-            completions = await self._chat_completions_openai(address, **chat_complete_request)
+            completions = await self._chat_completions_aiohttp(address, **chat_complete_request)
         except Exception as e:
             # Let user handle the exception
             exception = e
 
-        # await callback(completions, callback_additional_info, exception)
-        asyncio.create_task(self._safe_callback_wrapper(callback, completions, callback_additional_info, exception))
+        await callback(completions, callback_additional_info, exception)
+        # asyncio.create_task(self._safe_callback_wrapper(callback, completions, callback_additional_info, exception))
 
     async def _safe_callback_wrapper(self, callback, *args):
         try:
@@ -244,18 +244,19 @@ class ChatCompletionScheduler:
         # print(f"t20.0: {time.time()}, {address}, {client.base_url}")
         return await client.chat.completions.create(**chat_complete_request)
 
-    # async def _chat_completions_aiohttp(self, address: str, **chat_complete_request) -> ChatCompletion:
-    #     try:
-    #         session = aiohttp.ClientSession()
-    #         async with session.post(
-    #             url=f"http://{address}/v1/chat/completions",
-    #             headers={"Authorization": "Bearer token-abc123"},
-    #             json=chat_complete_request,
-    #         ) as resp:
-    #             data = await resp.json()
-    #             return ChatCompletion(**data)
-    #     finally:
-    #         await session.close()
+    async def _chat_completions_aiohttp(self, address: str, **chat_complete_request) -> ChatCompletion:
+        try:
+            extra_headers = chat_complete_request.pop("extra_headers")
+            session = aiohttp.ClientSession()
+            async with session.post(
+                url=f"http://{address}/v1/chat/completions",
+                headers={"Authorization": "Bearer token-abc123", **extra_headers},
+                json=chat_complete_request,
+            ) as resp:
+                data = await resp.json()
+                return ChatCompletion(**data)
+        finally:
+            await session.close()
 
     async def generate_sequences(self, prompts: DataProto, **sampling_params) -> DataProto:
         raise NotImplementedError

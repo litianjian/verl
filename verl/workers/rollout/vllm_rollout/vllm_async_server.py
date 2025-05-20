@@ -255,7 +255,7 @@ class AsyncvLLMServer(AsyncServerBase):
         await self.engine.sleep()
 
 
-from verl.workers.rollout.schemas import AsyncRolloutRequest, AsyncRolloutRequestStateEnum, Message
+from verl.workers.rollout.schemas import AsyncRolloutRequest, AsyncRolloutRequestStateEnum, Message, FinishReasonTypeEnum
 from verl.workers.rollout.vllm_rollout.vllm_rollout import _pre_process_inputs
 from verl.utils.model import compute_position_id_with_mask
 import asyncio
@@ -440,8 +440,7 @@ class AsyncvLLMServer1(AsyncServerBase):
         outputs: List[AsyncGenerator[RequestOutput, None]] = []
         with self.update_sampling_params(**kwargs):
             outputs = self.engine.generate(
-                # prompt=generation_prompt,  # because we have already convert it to prompt token id
-                prompt="介绍一下你自己",
+                prompt=generation_prompt,  # because we have already convert it to prompt token id
                 sampling_params=self.sampling_params,
                 request_id=_req.request_id,
             )
@@ -449,9 +448,15 @@ class AsyncvLLMServer1(AsyncServerBase):
                 results = res
         content = results.outputs[0].text
         finish_reason = results.outputs[0].finish_reason
+        finish_reason_type = FinishReasonTypeEnum.from_str(finish_reason)
+        if finish_reason_type == FinishReasonTypeEnum.LENGTH:
+            _req.add_assistant_message(self.tokenizer, content, already_over_long=True)
+        else:
+            _req.add_assistant_message(self.tokenizer, content)
 
-        print(finish_reason)
-        return results.outputs[0].text
+        _req.finalize(self.tokenizer, reward_scores=None, finish_reason_type=finish_reason_type)
+        
+        return _req
 
     @contextmanager
     def update_sampling_params(self, **kwargs):
@@ -480,10 +485,23 @@ class AsyncvLLMServer1(AsyncServerBase):
         )
 
         with torch.no_grad():
-            results = await asyncio.gather(
+            output_req_list = await asyncio.gather(
                 *[self._async_rollout_a_request(req, do_sample, is_validate, **kwargs) for req in req_list]
             )
-        return results
+        
+        sorted_output_req_list = sorted(output_req_list, key=lambda x: (x.batch_data_id, x.rollout_offset))
+
+        return sorted_output_req_list
+    def post_process(self, prompts: DataProto, output_req_list: List[AsyncRolloutRequest]) -> DataProto:
+        # convert to DataProto
+        output_data = DataProto()
+        output_data.batch = {}
+        output_data.non_tensor_batch = {}
+        output_data.meta_info = {}
+        output_data.meta_info["raw_prompt"] = []
+        output_data.meta_info["response"] = []
+        output_data.meta_info["response_ids"] = []
+
 
     async def chat_completion(self, raw_request: Request):
         """OpenAI-compatible HTTP endpoint.
