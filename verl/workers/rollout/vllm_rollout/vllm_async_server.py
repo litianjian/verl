@@ -483,25 +483,22 @@ class AsyncvLLMServer1(AsyncServerBase):
             prompts,
             n=1 if is_validate else self.config.rollout.n,
         )
-
+        print(len(req_list))
+        import time
+        t0 = time.time()
         with torch.no_grad():
             output_req_list = await asyncio.gather(
                 *[self._async_rollout_a_request(req, do_sample, is_validate, **kwargs) for req in req_list]
             )
-        
+        t1 = time.time()
+        print(f"time: {t1-t0}")
         sorted_output_req_list = sorted(output_req_list, key=lambda x: (x.batch_data_id, x.rollout_offset))
 
-        return sorted_output_req_list
-    def post_process(self, prompts: DataProto, output_req_list: List[AsyncRolloutRequest]) -> DataProto:
-        # convert to DataProto
-        output_data = DataProto()
-        output_data.batch = {}
-        output_data.non_tensor_batch = {}
-        output_data.meta_info = {}
-        output_data.meta_info["raw_prompt"] = []
-        output_data.meta_info["response"] = []
-        output_data.meta_info["response_ids"] = []
+        return self.post_process(sorted_output_req_list)
 
+    def post_process(self, output_req_list: List[AsyncRolloutRequest]) -> DataProto:
+        # convert to DataProto
+        
 
     async def chat_completion(self, raw_request: Request):
         """OpenAI-compatible HTTP endpoint.

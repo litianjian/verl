@@ -80,7 +80,7 @@ class NaiveChatCompletionScheduler(ChatCompletionScheduler):
                             "conversation": list(conversation),
                         },
                         model=self.model_name,
-                        messages=conversation,
+                        messages=conversation.tolist(),
                         **kwargs,
                     )
                 )

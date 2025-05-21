@@ -4,7 +4,7 @@ set -x
 # export VLLM_ATTENTION_BACKEND=XFORMERS
 
 # For async rollout mode, dataset should return raw chat.
-rollout_mode="async"
+rollout_mode="async_vllm"
 if [ "$rollout_mode" = "async" ]; then
     return_raw_chat="True"
     chat_scheduler=examples.ppo_trainer.naive_chat_scheduler.NaiveChatCompletionScheduler
@@ -46,8 +46,8 @@ python3 -m verl.trainer.main_ppo \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
     trainer.logger=['console'] \
-    trainer.project_name='verl_grpo_example_gsm8k' \
-    trainer.experiment_name='qwen2_7b_function_rm_kl1e-3' \
+    trainer.project_name='qwen2-math-async' \
+    trainer.experiment_name='qwen2_7b_text' \
     trainer.val_before_train=False \
     trainer.n_gpus_per_node=8 \
     trainer.nnodes=1 \

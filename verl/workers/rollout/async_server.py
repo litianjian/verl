@@ -476,11 +476,25 @@ class AsyncLLMServerManager1:
         """Generate multiple sequences in parallel via chat scheduler."""
         # assert self.chat_scheduler is not None, "chat scheduler is not initialized."
         # import pdb; pdb.set_trace()
+        num_servers = len(self.async_llm_servers)
+        batch_size = len(prompts.batch)
+        
+        # 创建分片索引 [0,1,2,...,batch_size-1]
+        indices = list(range(batch_size))
+        chunk_size = (batch_size + num_servers - 1) // num_servers  # 向上取整
+        
+        # 将prompts分片到各个server
         result = [
-            server.generate_sequences.remote(prompts, **sampling_params)
-            for server in self.async_llm_servers
+            server.generate_sequences.remote(
+                prompts.select_idxs(indices[i*chunk_size : (i+1)*chunk_size]),  # 选择当前分片
+                **sampling_params
+            )
+            for i, server in enumerate(self.async_llm_servers)
         ]
-        return ray.get(result)
+        
+        # 收集并合并结果
+        outputs = ray.get(result)
+        return DataProto.cat(outputs)
 
 
 def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:
