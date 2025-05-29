@@ -410,6 +410,7 @@ class AsyncLLMServerManager1:
         from verl.workers.rollout.vllm_rollout.vllm_async_server import AsyncvLLMServer1
 
         server_class = AsyncvLLMServer1
+        config.rollout.max_model_len = config.rollout.max_model_len if config.rollout.max_model_len else config.rollout.prompt_length + config.rollout.response_length
 
         # Start all server instances, restart if address already in use.
         unready_dp_ranks = set(range(self.rollout_dp_size))
@@ -494,7 +495,7 @@ class AsyncLLMServerManager1:
         
         # 收集并合并结果
         outputs = ray.get(result)
-        return DataProto.cat(outputs)
+        return DataProto.concat(outputs)
 
 
 def async_server_class(rollout_backend: str) -> Type[AsyncServerBase]:

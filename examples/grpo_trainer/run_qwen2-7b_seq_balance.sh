@@ -18,7 +18,7 @@ python3 -m verl.trainer.main_ppo \
     data.train_files=$HOME/data/gsm8k/train.parquet \
     data.val_files=$HOME/data/gsm8k/test.parquet \
     data.return_raw_chat=$return_raw_chat \
-    data.train_batch_size=512 \
+    data.train_batch_size=8 \
     data.max_prompt_length=512 \
     data.max_response_length=1024 \
     data.filter_overlong_prompts=True \
@@ -26,7 +26,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.path=Qwen/Qwen2-7B-Instruct \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.model.use_remove_padding=True \
-    actor_rollout_ref.actor.ppo_mini_batch_size=128 \
+    actor_rollout_ref.actor.ppo_mini_batch_size=8 \
     actor_rollout_ref.actor.use_dynamic_bsz=True \
     actor_rollout_ref.actor.ppo_max_token_len_per_gpu=24000 \
     actor_rollout_ref.actor.use_kl_loss=False \

@@ -14,6 +14,8 @@
 import logging
 from collections.abc import AsyncGenerator
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
+from tensordict import TensorDict
+import numpy as np
 
 import cloudpickle
 import ray
@@ -29,6 +31,9 @@ from vllm.entrypoints.openai.serving_models import BaseModelPath, OpenAIServingM
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.executor.abstract import Executor
 from vllm.worker.worker_base import WorkerWrapperBase
+from torch.nn.utils.rnn import pad_sequence
+from verl.utils.torch_functional import pad_sequence_to_length
+
 from verl import DataProto
 
 from verl.utils.fs import copy_to_local
@@ -494,11 +499,100 @@ class AsyncvLLMServer1(AsyncServerBase):
         print(f"time: {t1-t0}")
         sorted_output_req_list = sorted(output_req_list, key=lambda x: (x.batch_data_id, x.rollout_offset))
 
-        return self.post_process(sorted_output_req_list)
+        return self.post_process(prompts, sorted_output_req_list)
 
-    def post_process(self, output_req_list: List[AsyncRolloutRequest]) -> DataProto:
+    def post_process(self, prompts: DataProto, output_req_list: List[AsyncRolloutRequest]) -> DataProto:
+        config = self.config.rollout
+        do_sample = prompts.meta_info.get("do_sample", True)
+        is_validate = prompts.meta_info.get("is_validate", False)
+        tgt_device = prompts.batch["input_ids"].device
+
         # convert to DataProto
-        
+        prompt_ids, response_ids = [], []
+        prompt_ids, response_ids = [], []
+        prompt_attention_mask, response_attention_mask = [], []
+        prompt_position_ids, response_position_ids = [], []
+        prompt_loss_mask, response_loss_mask = [], []
+        messages = []
+        reward_scores = []
+
+        for req in output_req_list:
+            assert req.state == AsyncRolloutRequestStateEnum.COMPLETED, f"Request {req.request_id} is not completed"
+            assert len(req.input_ids) == len(req.attention_mask) == len(req.position_ids) == len(req.loss_mask), f"""Request {req.request_id} has different length of 
+                {len(req.input_ids)=}, {len(req.attention_mask)=}, {len(req.position_ids)=}, {len(req.loss_mask)=}"""
+            error_message_lines = [
+                f"""Request {req.request_id} has input_ids length {len(req.input_ids)}
+                    greater than max_model_len {config.max_model_len}""",
+                f"Decoded input_ids: {self.tokenizer.decode(req.input_ids)}",
+                f"Decoded prompt_ids: {self.tokenizer.decode(req.prompt_ids)}",
+                f"Decoded response_ids: {self.tokenizer.decode(req.response_ids)}",
+                f"Messages: {req.messages}",
+                f"Max model length: {req.max_model_len}",
+            ]
+            error_message = "\n".join(error_message_lines)
+            assert len(req.input_ids) <= config.max_model_len, error_message
+            prompt_ids.append(torch.tensor(req.prompt_ids, dtype=torch.int, device=tgt_device))
+            response_ids.append(torch.tensor(req.response_ids, dtype=torch.int, device=tgt_device))
+            if len(req.response_ids) > config.response_length:
+                print(
+                    f"""{req.request_id=} has response_ids length {len(req.response_ids)} 
+                    greater than max_response_len {config.response_length},\n{req=}"""
+                )
+            prompt_attention_mask.append(torch.tensor(req.prompt_attention_mask, dtype=torch.int, device=tgt_device))
+            response_attention_mask.append(torch.tensor(req.response_attention_mask, dtype=torch.int, device=tgt_device))
+            prompt_position_ids.append(torch.tensor(req.prompt_position_ids, dtype=torch.int, device=tgt_device))
+            response_position_ids.append(torch.tensor(req.response_position_ids, dtype=torch.int, device=tgt_device))
+            prompt_loss_mask.append(torch.tensor(req.prompt_loss_mask, dtype=torch.int, device=tgt_device))
+            response_loss_mask.append(torch.tensor(req.response_loss_mask, dtype=torch.int, device=tgt_device))
+            messages.append({"messages": req.messages})
+            reward_scores.append(req.reward_scores)
+
+        prompt_ids = pad_sequence(prompt_ids, batch_first=True, padding_value=self.pad_token_id, padding_side="left")
+        print(config.prompt_length)
+        if prompt_ids.shape[1] < config.prompt_length:
+            prompt_ids = pad_sequence_to_length(prompt_ids, config.prompt_length, self.pad_token_id, left_pad=True)
+        response_ids = pad_sequence(response_ids, batch_first=True, padding_value=self.pad_token_id)
+        if response_ids.shape[1] < config.response_length:
+            response_ids = pad_sequence_to_length(response_ids, config.response_length, self.pad_token_id)
+        prompt_attention_mask = pad_sequence(prompt_attention_mask, batch_first=True, padding_value=0, padding_side="left")
+        if prompt_attention_mask.shape[1] < config.prompt_length:
+            prompt_attention_mask = pad_sequence_to_length(prompt_attention_mask, config.prompt_length, 0, left_pad=True)
+        response_attention_mask = pad_sequence(response_attention_mask, batch_first=True, padding_value=0)
+        if response_attention_mask.shape[1] < config.response_length:
+            response_attention_mask = pad_sequence_to_length(response_attention_mask, config.response_length, 0)
+        prompt_position_ids = pad_sequence(prompt_position_ids, batch_first=True, padding_value=0, padding_side="left")
+        if prompt_position_ids.shape[1] < config.prompt_length:
+            prompt_position_ids = pad_sequence_to_length(prompt_position_ids, config.prompt_length, 0, left_pad=True)
+        response_length = response_ids.size(1)
+        delta_position_id = torch.arange(1, response_length + 1, device=response_ids.device)
+        delta_position_id = delta_position_id.unsqueeze(0).repeat(len(output_req_list), 1)
+        response_position_ids = prompt_position_ids[:, -1:] + delta_position_id
+        prompt_loss_mask = pad_sequence(prompt_loss_mask, batch_first=True, padding_value=0, padding_side="left")
+        if prompt_loss_mask.shape[1] < config.prompt_length:
+            prompt_loss_mask = pad_sequence_to_length(prompt_loss_mask, config.prompt_length, 0, left_pad=True)
+        response_loss_mask = pad_sequence(response_loss_mask, batch_first=True, padding_value=0)
+        if response_loss_mask.shape[1] < config.response_length:
+            response_loss_mask = pad_sequence_to_length(response_loss_mask, config.response_length, 0)
+
+        input_ids = torch.cat((prompt_ids, response_ids), dim=-1)
+        attention_mask = torch.cat((prompt_attention_mask, response_attention_mask), dim=-1)
+        position_ids = torch.cat((prompt_position_ids, response_position_ids), dim=-1)
+        loss_mask = torch.cat((prompt_loss_mask, response_loss_mask), dim=-1)
+
+        # Construct the batch data
+        batch = TensorDict(
+            {
+                "prompts": prompt_ids,
+                "responses": response_ids,
+                "input_ids": input_ids,  # here input_ids become the whole sentences
+                "attention_mask": attention_mask,
+                "position_ids": position_ids,
+                "loss_mask": loss_mask,
+            },
+            batch_size=len(output_req_list),
+        )
+
+        return DataProto(batch=batch, non_tensor_batch={"messages": np.array(messages), "reward_scores": np.array(reward_scores)})
 
     async def chat_completion(self, raw_request: Request):
         """OpenAI-compatible HTTP endpoint.
