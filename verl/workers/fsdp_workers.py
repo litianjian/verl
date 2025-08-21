@@ -1741,7 +1741,7 @@ class AsyncActorRolloutRefWorker(ActorRolloutRefWorker):
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
     def execute_method(self, method: str | bytes, *args, **kwargs):
         """Called by ExternalRayDistributedExecutor collective_rpc."""
-        return self.rollout.execute_method(method, *args, **kwargs)
+        return self.rollout._execute_method(method, *args, **kwargs)
 
     @register(dispatch_mode=Dispatch.DIRECT_ROLLOUT_METHOD)
     def get_zeromq_address(self):

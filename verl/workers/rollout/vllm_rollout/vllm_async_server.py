@@ -55,11 +55,13 @@ def _get_model_runner_workers(vllm_config, init_ray: bool = True):
 
     # Make sure subprocess in same namespace as parent actor.
     # actor name format: {name_prefix}WorkerDict_{pg_idx}:{local_rank}
+
     if init_ray:
-        ray.init(namespace=namespace)
+        ray.init(namespace=namespace, address="auto")
     actor_names = [
         actor_name for actor_name in ray.util.list_named_actors() if actor_name.startswith(f"{wg_prefix}WorkerDict")
     ]
+    print(actor_names)
 
     vllm_tp_size = vllm_config.parallel_config.tensor_parallel_size
     assert len(actor_names) == vllm_dp_size * vllm_tp_size, (
@@ -235,7 +237,7 @@ class AsyncvLLMServer(AsyncServerBase):
         for k in config.keys():
             if hasattr(SamplingParams(), str(k)):
                 kwargs[k] = config.get(k)
-        print(f"override_generation_config: {kwargs}")
+        # print(f"override_generation_config: {kwargs}")
 
         backend = os.environ.get("VERL_VLLM_DISTRIBUTED_BACKEND", "zeromq")
         if backend == "zeromq":

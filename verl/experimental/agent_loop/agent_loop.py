@@ -336,6 +336,53 @@ class AgentLoopWorker:
             trace_config.get("backend"),
             trace_config.get("token2text", False),
         )
+    async def generate_sequences_no_post(self, batch: DataProto) -> list[AgentLoopOutput]:
+        """Generate sequences from agent loop.
+
+        Args:
+            batch (DataProto): Input batch.
+
+        Returns:
+            list[AgentLoopOutput]: List of agent loop outputs, one per sample in the batch.
+            Each AgentLoopOutput contains:
+            - prompt_ids: prompt token ids
+            - response_ids: response token ids including LLM generated and tool response tokens
+            - response_mask: 1 for LLM generated tokens, 0 for tool response tokens
+            - num_turns: number of chat turns
+            - metrics: performance metrics
+        """
+        config = self.config.actor_rollout_ref.rollout
+        sampling_params = dict(
+            temperature=config.temperature,
+            top_p=config.top_p,
+            repetition_penalty=1.0,
+        )
+
+        # override sampling params for validation
+        if batch.meta_info.get("validate", False):
+            sampling_params["top_p"] = config.val_kwargs.top_p
+            sampling_params["temperature"] = config.val_kwargs.temperature
+
+        # by default, we assume it's a single turn agent
+        if "agent_name" not in batch.non_tensor_batch:
+            batch.non_tensor_batch["agent_name"] = np.array(["single_turn_agent"] * len(batch), dtype=object)
+
+        if "index" in batch.non_tensor_batch:
+            index = batch.non_tensor_batch["index"]
+        else:
+            index = np.arange(len(batch))
+
+        tasks = []
+        trajectory_info = await get_trajectory_info(
+            batch.meta_info.get("global_steps", -1), index, batch.meta_info.get("validate", False)
+        )
+
+        for i in range(len(batch)):
+            kwargs = {k: v[i] for k, v in batch.non_tensor_batch.items()}
+            tasks.append(asyncio.create_task(self._run_agent_loop(sampling_params, trajectory_info[i], **kwargs)))
+        outputs = await asyncio.gather(*tasks)
+
+        return outputs       
 
     async def generate_sequences(self, batch: DataProto) -> DataProto:
         """Generate sequences from agent loop.
@@ -422,6 +469,8 @@ class AgentLoopWorker:
             )
             output: AgentLoopOutput = await agent_loop.run(sampling_params, **kwargs)
 
+            return output
+        
             # Some AgentLoop may have already computed the reward score, e.g SWE-agent.
             if output.reward_score is None and not self.config.reward_model.enable:
                 output.reward_score = await self.reward_manager_worker.compute_score.remote(output, kwargs)
@@ -682,7 +731,7 @@ class AgentLoopManager:
         num_workers = self.config.actor_rollout_ref.rollout.agent.num_workers
 
         node_ids = [node["NodeID"] for node in ray.nodes() if node["Alive"] and node["Resources"].get("CPU", 0) > 0]
-        for i in range(num_workers):
+        for i in range(2):
             # Round-robin scheduling over the all nodes
             node_id = node_ids[i % len(node_ids)]
             self.agent_loop_workers.append(
@@ -722,6 +771,41 @@ class AgentLoopManager:
 
         output.meta_info = {"timing": timing}
         return output
+
+    async def generate_sample_async(self, sample: DataProto, sample_id: str) -> tuple[AgentLoopOutput, float]:
+        """Split input batch and dispatch to agent loop workers.
+        Args:
+            prompts (DataProto): Input batch.
+        Returns:
+            DataProto: Output batch.
+        """
+        import time
+        start_time = time.time()
+        worker = self._select_best_worker()
+
+        output_future = worker.generate_sequences_no_post.remote(sample)
+        outputs = await asyncio.wrap_future(output_future.future())
+
+        processing_time = time.time() - start_time
+
+        # outputs 是 AgentLoopOutput 列表，取第一个（因为是单样本）
+        assert len(outputs) == 1, f"Expected single output for single sample, got {len(outputs)}"
+        output = outputs[0]
+
+        # 添加处理时间到metrics
+        output.metrics.generate_sequences = processing_time
+
+        return output, processing_time
+    
+
+    def _select_best_worker(self):
+        """选择最佳的 worker（简单的轮询负载均衡）"""
+        if not hasattr(self, "_worker_index"):
+            self._worker_index = 0
+
+        worker = self.agent_loop_workers[self._worker_index]
+        self._worker_index = (self._worker_index + 1) % len(self.agent_loop_workers)
+        return worker
 
     def _performance_metrics(self, metrics: list[list[dict[str, str]]], output: DataProto) -> dict[str, float]:
         timing = {}
