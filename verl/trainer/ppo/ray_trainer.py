@@ -1201,6 +1201,7 @@ class RayPPOTrainer:
                     if self.config.trainer.critic_warmup <= self.global_steps:
                         # update actor
                         with marked_timer("update_actor", timing_raw, color="red"):
+                            print("update_actor in single:", batch.batch["layers_topk_idx"].shape)
                             batch.meta_info["multi_turn"] = self.config.actor_rollout_ref.rollout.multi_turn.enable
                             actor_output = self.actor_rollout_wg.update_actor(batch)
                         actor_output_metrics = reduce_metrics(actor_output.meta_info["metrics"])
