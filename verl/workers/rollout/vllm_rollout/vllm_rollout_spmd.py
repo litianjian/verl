@@ -437,20 +437,28 @@ class vLLMRollout(BaseRollout):
                         routed_experts.append(routed_expert)
             
                 for i, routed_expert in enumerate(routed_experts):
-                    response_length = response[i].size(0)
-                    total_length = routed_expert.size(0)
+                    response_length = len(response[i])
+                    print("routed_expert", type(routed_expert))
+                    # Convert numpy array to torch tensor
+                    routed_expert_tensor = torch.from_numpy(routed_expert)
+                    total_length = routed_expert_tensor.shape[0]
                     assert total_length >= response_length , f"routed_expert length {total_length} is shorter than response length {response_length}"
-                    input_expert = routed_expert[:-response_length]
+                    input_expert = routed_expert_tensor[:-response_length]
                     pad_input_expert = pad_first_dim_tail(input_expert, max_prompt_length, value=-1, left_pad=True)
+                    print("pad_input_expert", pad_input_expert.shape)
                     input_routed_experts.append(pad_input_expert)
 
-                    output_expert = routed_expert[-response_length:]
+                    output_expert = routed_expert_tensor[-response_length:]
                     pad_output_expert = pad_first_dim_tail(output_expert, self.config.response_length, value=-1, left_pad=False)
+                    print("pad_output_expert", pad_output_expert.shape)
                     output_routed_experts.append(pad_output_expert)
                 
                 # Convert list of tensors to batch tensor
-                routed_experts = torch.stack(routed_experts, dim=0)
-            
+                input_routed_experts = torch.stack(input_routed_experts, dim=0)
+                output_routed_experts = torch.stack(output_routed_experts, dim=0)
+
+                router_output = torch.cat([input_routed_experts, output_routed_experts], dim=1)
+
             response = pad_2d_list_to_length(response, self.pad_token_id, max_length=self.config.response_length).to(
                 idx.device
             )
@@ -493,6 +501,9 @@ class vLLMRollout(BaseRollout):
         if self.config.calculate_log_probs:
             # we will recompute old log prob with actor
             batch["rollout_log_probs"] = rollout_log_probs
+
+        if self.config.enable_rollout_routing_replay:
+            batch["layers_topk_idx"] = router_output
 
         return DataProto(batch=batch, non_tensor_batch=non_tensor_batch)
 
