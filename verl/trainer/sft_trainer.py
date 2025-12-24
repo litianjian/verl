@@ -96,6 +96,11 @@ class SFTTrainer:
         self.engine_config = omega_conf_to_dataclass(self.config.engine)
         self.optimizer_config = omega_conf_to_dataclass(self.config.optim)
         self.checkpoint_config = omega_conf_to_dataclass(self.config.checkpoint)
+        
+        print(self.model_config)
+        print(self.engine_config)
+        print(self.optimizer_config)
+        print(self.checkpoint_config)
 
     def _build_engine(self):
         from verl.workers.engine_workers import TrainingWorkerConfig
