@@ -157,7 +157,10 @@ class MegatronCheckpointManager(BaseCheckpointManager):
         self.weight_saver = None
         if self.bridge is None:
             self.weight_saver = get_weight_saver(self.arch)
-
+        print(f"use_dist_checkpointing: {self.use_dist_checkpointing}")
+        print(f"use_hf_checkpoint: {self.use_hf_checkpoint}")
+        print(f"vanilla_bridge: {self.vanilla_bridge} {self.role}")
+        
     def get_rng_state(self, use_dist_ckpt: bool = True, data_parallel_random_init: bool = False):
         """collect rng state across data parallel ranks"""
         rng_state = {
