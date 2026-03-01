@@ -482,10 +482,6 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 assert async_save_request is None, "Async save request should be None when not using async save."
                 torch.distributed.barrier()
 
-        print(f"self.should_save_model: {self.should_save_model}")
-        print(f"self.checkpoint_config.async_save: {self.checkpoint_config.async_save}")
-        print(f"self.vanilla_bridge: {self.vanilla_bridge}")
-        
         if self.should_save_model:
             # Save adapter-only checkpoint if PEFT is enabled
             if self.peft_cls is not None:
@@ -510,13 +506,14 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 # Use mbridge to save HF model checkpoint
                 log_with_rank(f"Saving HF model checkpoint to {local_path} with bridge", rank=self.rank, logger=logger)
                 hf_ckpt_path = get_hf_model_checkpoint_path(local_path)
+                print(f"before saving")
                 if self.vanilla_bridge:
                     self.bridge.save_weights(
-                        self.model, hf_ckpt_path, distributed_filesystem=True, memory_efficient=True
+                        self.model, hf_ckpt_path, distributed_filesystem=False, memory_efficient=False
                     )
                 else:
                     self.bridge.save_hf_weights(self.model, hf_ckpt_path)
-
+                print(f"after saving")
                 log_with_rank(f"Saved bridge checkpoint to {hf_ckpt_path}", rank=self.rank, logger=logger)
 
             # Only rank 0 saves the hf config and tokenizer to huggingface path
@@ -541,10 +538,6 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                     logger=logger,
                     log_only_rank_0=True,
                 )
-
-        print(f"self.should_save_model: {self.should_save_model}")
-        print(f"self.checkpoint_config.async_save: {self.checkpoint_config.async_save}")
-        print(f"self.vanilla_bridge: {self.vanilla_bridge}")
         
         if self.should_save_extra:
             if self.rank == 0:
@@ -581,10 +574,6 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 transformer_config_path = get_transformer_config_checkpoint_path(local_path)
                 with open(transformer_config_path, "w") as f:
                     json.dump(transformer_config_dict, f, indent=2)
-
-        print(f"self.should_save_model: {self.should_save_model}")
-        print(f"self.checkpoint_config.async_save: {self.checkpoint_config.async_save}")
-        print(f"self.vanilla_bridge: {self.vanilla_bridge}")
 
         if self.should_save_hf_model and not self.use_hf_checkpoint:
             # wait for everyone to dump to local
@@ -647,9 +636,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                             logger=logger,
                             log_only_rank_0=True,
                         )
-        print(f"self.should_save_model: {self.should_save_model}")
-        print(f"self.checkpoint_config.async_save: {self.checkpoint_config.async_save}")
-        print(f"self.vanilla_bridge: {self.vanilla_bridge}")
+
         def finalize_save_fn():
             # Rank 0 uploads checkpoint to HDFS if hdfs_path is provided
             log_with_rank(
