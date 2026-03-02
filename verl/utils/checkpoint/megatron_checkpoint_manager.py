@@ -509,7 +509,7 @@ class MegatronCheckpointManager(BaseCheckpointManager):
                 print(f"before saving")
                 if self.vanilla_bridge:
                     self.bridge.save_weights(
-                        self.model, hf_ckpt_path, distributed_filesystem=True, memory_efficient=True
+                        self.model, hf_ckpt_path, distributed_filesystem=False, memory_efficient=True
                     )
                 else:
                     self.bridge.save_hf_weights(self.model, hf_ckpt_path)
